@@ -3539,6 +3539,33 @@ impl<'a> Lower<'a> {
         self.s.m.select(c, helper, own, first)
     }
 
+    /// The console's coarse quad derivatives of float coordinates `cs`, as
+    /// `sampleGrad` takes them: x (lane 1 less lane 0 of the quad) then y
+    /// (lane 2 less lane 0), three each, unused ones undefined.
+    fn quad_derivatives(&mut self, cs: &[V]) -> Vec<V> {
+        self.s.flags |= flags::WAVE_OPS;
+        let c = self.cur;
+        let lane = self.lane_index();
+        let not3 = self.s.m.i32(!3);
+        let q0 = self.s.m.bin(c, Bin::And, lane, not3);
+        let (one, two) = (self.s.m.i32(1), self.s.m.i32(2));
+        let q1 = self.s.m.bin(c, Bin::Or, q0, one);
+        let q2 = self.s.m.bin(c, Bin::Or, q0, two);
+        let fu = self.s.m.undef(self.s.t.f32);
+        let mut g = vec![fu; 6];
+        for (k, &x) in cs.iter().enumerate().take(3) {
+            let xi = self.as_int(x);
+            let at = |l: &mut Self, q: V| {
+                let v = l.read_lane(xi, q);
+                l.as_float(v)
+            };
+            let (v0, v1, v2) = (at(self, q0), at(self, q1), at(self, q2));
+            g[k] = self.s.m.bin(c, Bin::Sub, v1, v0);
+            g[3 + k] = self.s.m.bin(c, Bin::Sub, v2, v0);
+        }
+        g
+    }
+
     fn read_lane(&mut self, x: V, lane: V) -> V {
         self.s.op(
             self.cur,
@@ -9188,11 +9215,10 @@ impl<'a> Lower<'a> {
         // incompatible with the shader stage", #201). Drivers take such a
         // module in the per-lane form; in the console flow in halves, with
         // group barriers in its loops and branches, a title run lost its
-        // device in two of them. Such a program stops here until the sample
-        // has a valid form.
-        if matches!(op, 60 | 61) && !self.s.pixel && self.console_cf && self.split {
-            return Err(IMPLICIT_SAMPLE_IN_HALVES);
-        }
+        // device in two of them. There it becomes a gradient sample instead,
+        // of the console's coarse quad derivatives read from the quad's lanes
+        // (a quad never straddles the halves): valid DXIL in compute.
+        let quad_grads = matches!(op, 60 | 61) && !self.s.pixel && self.console_cf && self.split;
         if op == 72 {
             // Width, height, depth or layers, levels (per dmask) of the level
             // in the first address: DXIL's dimensions; a channel DXIL leaves
@@ -9345,6 +9371,32 @@ impl<'a> Lower<'a> {
             let mut args = vec![h, sh];
             args.extend(&cs);
             match op {
+                60 | 61 if quad_grads => {
+                    if offset_word {
+                        return Err(IMPLICIT_SAMPLE_IN_HALVES);
+                    }
+                    let mut g = self.quad_derivatives(&cs[..spatial]);
+                    if op == 61 {
+                        // A bias of b is gradients 2^b times as long.
+                        let bias = addr_val(self, 0)?;
+                        let bias = to_float(self, bias);
+                        let scale = self.unary(21, bias);
+                        for k in (0..spatial.min(3)).flat_map(|k| [k, 3 + k]) {
+                            g[k] = self.s.m.bin(c, Bin::Mul, g[k], scale);
+                        }
+                    }
+                    args.extend(&os);
+                    args.extend(g);
+                    args.push(fu);
+                    self.s.op(
+                        c,
+                        "sampleGrad.f32",
+                        Attr::ReadOnly,
+                        self.s.t.res_ret,
+                        63,
+                        &args,
+                    )
+                }
                 60 => {
                     if offset_word {
                         // DXIL takes immediate offsets in -8..=7; the

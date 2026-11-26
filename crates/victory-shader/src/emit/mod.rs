@@ -2006,21 +2006,18 @@ mod tests {
         }
     }
 
-    /// A compute sample with implicit derivatives has no valid DXIL form;
-    /// in the console flow in halves (group barriers in its branches and
-    /// loops) it stops, by name. The per-lane form and a host with 64-lane
-    /// waves are unchanged.
+    /// A compute sample with implicit derivatives in the console flow in
+    /// halves translates, as a gradient sample of the quad's derivatives.
+    /// The per-lane form and a host with 64-lane waves are unchanged.
     #[test]
-    fn implicit_samples_stop_the_console_flow_in_halves() {
+    fn implicit_samples_in_the_console_flow_in_halves_take_quad_gradients() {
         let why = |r: Result<super::HostShader, crate::ShaderError>| match r {
             Err(crate::ShaderError::Unsupported { what, .. }) => Some(what),
             Err(e) => panic!("{e}"),
             Ok(_) => None,
         };
-        assert_eq!(
-            why(emit_for(&implicit_sample(true), NVIDIA)),
-            Some(super::lower::IMPLICIT_SAMPLE_IN_HALVES)
-        );
+        // In halves it is a gradient sample of quad derivatives instead.
+        assert_eq!(why(emit_for(&implicit_sample(true), NVIDIA)), None);
         assert_eq!(why(emit_for(&implicit_sample(true), RDNA)), None);
         assert_eq!(why(emit_for(&implicit_sample(false), NVIDIA)), None);
         assert_eq!(why(emit_for(&implicit_sample(false), RDNA)), None);
